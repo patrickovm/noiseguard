@@ -1,182 +1,196 @@
 #include <stdio.h>
-#include "pico/stdlib.h"
-#include "FreeRTOS.h"
-#include "task.h"
-#include "queue.h"
-#include "hardware/i2c.h"
-#include "hardware/adc.h"
-#include "ssd1306_i2c.h"
-#include "ssd1306.h"
-#include "ds18b20.h"
-
 #include <string.h>
 
-#define LED_RED_PIN 13
-#define LED_GREEN_PIN 11
-#define LED_BLUE_PIN 12
-#define BUZZER_PIN 21
-#define BUTTON_A_PIN 5
-#define DS18B20_PIN 4
+#include "pico/stdlib.h"
+#include "hardware/adc.h"
+#include "hardware/i2c.h"
+#include "FreeRTOS.h"
+#include "task.h"
+#include "semphr.h"
+#include "ssd1306.h"
 
-static DS18B20 temp_sensor;
-#define I2C_SDA_PIN 14
-#define I2C_SCL_PIN 15
+#define LED_RED     13
+#define LED_GREEN   11
+#define LED_BLUE    12
+#define BTN_A        5
+#define BTN_B        6
+#define MIC_IN      28
+#define JOYSTICK_X  27
+#define JOYSTICK_Y  26
+#define JOYSTICK_SW 22
+#define I2C_SDA     14
+#define I2C_SCL     15
 
-// Temperature thresholds (in Celsius)
-static float temp_threshold = 25.0f;
-static uint8_t display_buffer[ssd1306_buffer_length];
+// Constants
+#define NOISE_THRESHOLD_WARNING 2000
+#define NOISE_THRESHOLD_DANGER  3000
+#define SAMPLE_RATE_MS 100
+#define DISPLAY_UPDATE_MS 500
 
-TaskHandle_t tempTaskHandle;
-TaskHandle_t displayTaskHandle;
-TaskHandle_t alertTaskHandle;
+// Global variables
+static SemaphoreHandle_t displayMutex;
+static uint8_t displayBuffer[ssd1306_buffer_length];
+static int noiseLevel = 0;
+static int warningThreshold = NOISE_THRESHOLD_WARNING;
+static int dangerThreshold = NOISE_THRESHOLD_DANGER;
 
-void vTempTask(void *pvParameters);
-void vDisplayTask(void *pvParameters);
-void vAlertTask(void *pvParameters);
-void init_hardware(void);
+// Function prototypes
+void vTaskMonitorNoise(void *pvParameters);
+void vTaskUpdateDisplay(void *pvParameters);
+void vTaskHandleInput(void *pvParameters);
+void updateLEDStatus(int level);
+void initializeHardware(void);
 
-QueueHandle_t xTempQueue;
-
-int main()
-{
-    stdio_init_all();
-    init_hardware();
-
-    xTempQueue = xQueueCreate(1, sizeof(float));
-
-    xTaskCreate(vTempTask, "TempTask", configMINIMAL_STACK_SIZE, NULL, 2, &tempTaskHandle);
-    xTaskCreate(vDisplayTask, "DisplayTask", configMINIMAL_STACK_SIZE, NULL, 1, &displayTaskHandle);
-    xTaskCreate(vAlertTask, "AlertTask", configMINIMAL_STACK_SIZE, NULL, 1, &alertTaskHandle);
-
-    vTaskStartScheduler();
-
-    while (1)
-    {
-        // Should never get here
-    }
-}
-
-void init_hardware(void)
-{
-    if (!ds18b20_init(&temp_sensor, pio0, DS18B20_PIN))
-    {
-        printf("Failed to initialize DS18B20\n");
-    }
-
+// Initialize all hardware components
+void initializeHardware(void) {
+    // Initialize GPIO
+    gpio_init(LED_RED);
+    gpio_init(LED_GREEN);
+    gpio_init(LED_BLUE);
+    gpio_set_dir(LED_RED, GPIO_OUT);
+    gpio_set_dir(LED_GREEN, GPIO_OUT);
+    gpio_set_dir(LED_BLUE, GPIO_OUT);
+    
+    // Initialize buttons with pull-up
+    gpio_init(BTN_A);
+    gpio_init(BTN_B);
+    gpio_set_dir(BTN_A, GPIO_IN);
+    gpio_set_dir(BTN_B, GPIO_IN);
+    gpio_pull_up(BTN_A);
+    gpio_pull_up(BTN_B);
+    
+    // Initialize ADC for microphone
+    adc_init();
+    adc_gpio_init(MIC_IN);
+    adc_select_input(2); // GPIO28 is on ADC2
+    
+    // Initialize I2C for OLED
     i2c_init(i2c1, 400000);
-    gpio_set_function(I2C_SDA_PIN, GPIO_FUNC_I2C);
-    gpio_set_function(I2C_SCL_PIN, GPIO_FUNC_I2C);
-    gpio_pull_up(I2C_SDA_PIN);
-    gpio_pull_up(I2C_SCL_PIN);
-
+    gpio_set_function(I2C_SDA, GPIO_FUNC_I2C);
+    gpio_set_function(I2C_SCL, GPIO_FUNC_I2C);
+    gpio_pull_up(I2C_SDA);
+    gpio_pull_up(I2C_SCL);
+    
     ssd1306_init();
-
-    gpio_init(LED_RED_PIN);
-    gpio_init(LED_GREEN_PIN);
-    gpio_init(LED_BLUE_PIN);
-    gpio_init(BUZZER_PIN);
-    gpio_init(BUTTON_A_PIN);
-
-    gpio_set_dir(LED_RED_PIN, GPIO_OUT);
-    gpio_set_dir(LED_GREEN_PIN, GPIO_OUT);
-    gpio_set_dir(LED_BLUE_PIN, GPIO_OUT);
-    gpio_set_dir(BUZZER_PIN, GPIO_OUT);
-    gpio_set_dir(BUTTON_A_PIN, GPIO_IN);
-
-    gpio_pull_up(BUTTON_A_PIN);
 }
 
-void vTempTask(void *pvParameters)
-{
-    float temperature;
-    TickType_t xLastWakeTime;
-    xLastWakeTime = xTaskGetTickCount();
-
-    while (1)
-    {
-        temperature = ds18b20_read_temp(&temp_sensor);
-
-        xQueueOverwrite(xTempQueue, &temperature);
-
-        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(1000));
+// Task to monitor noise levels
+void vTaskMonitorNoise(void *pvParameters) {
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    
+    while (1) {
+        uint16_t raw = adc_read();
+        noiseLevel = raw;
+        updateLEDStatus(raw);
+        
+        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(SAMPLE_RATE_MS));
     }
 }
 
-void vDisplayTask(void *pvParameters)
-{
-    float temperature;
-    char str[32];
+// Task to update the OLED display
+void vTaskUpdateDisplay(void *pvParameters) {
     struct render_area area = {
         .start_column = 0,
         .end_column = ssd1306_width - 1,
         .start_page = 0,
-        .end_page = ssd1306_n_pages - 1};
+        .end_page = ssd1306_n_pages - 1
+    };
     calculate_render_area_buffer_length(&area);
-
-    while (1)
-    {
-        if (xQueuePeek(xTempQueue, &temperature, 0) == pdTRUE)
-        {
-            memset(display_buffer, 0, sizeof(display_buffer));
-
-            snprintf(str, sizeof(str), "Temp: %.1fC", temperature);
-            ssd1306_draw_string(display_buffer, 0, 0, str);
-
-            snprintf(str, sizeof(str), "Limit: %.1fC", temp_threshold);
-            ssd1306_draw_string(display_buffer, 0, 16, str);
-
-            render_on_display(display_buffer, &area);
+    
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    
+    while (1) {
+        if (xSemaphoreTake(displayMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            // Clear buffer
+            memset(displayBuffer, 0, sizeof(displayBuffer));
+            
+            // Draw static text
+            ssd1306_draw_string(displayBuffer, 0, 0, "NOISE MONITOR");
+            
+            // Draw current level
+            char levelStr[32];
+            snprintf(levelStr, sizeof(levelStr), "Level: %d", noiseLevel);
+            ssd1306_draw_string(displayBuffer, 0, 16, levelStr);
+            
+            // Draw thresholds
+            snprintf(levelStr, sizeof(levelStr), "Warn: %d", warningThreshold);
+            ssd1306_draw_string(displayBuffer, 0, 32, levelStr);
+            snprintf(levelStr, sizeof(levelStr), "Dang: %d", dangerThreshold);
+            ssd1306_draw_string(displayBuffer, 0, 48, levelStr);
+            
+            // Update display
+            render_on_display(displayBuffer, &area);
+            
+            xSemaphoreGive(displayMutex);
         }
-
-        vTaskDelay(pdMS_TO_TICKS(100));
+        
+        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(DISPLAY_UPDATE_MS));
     }
 }
 
-void vAlertTask(void *pvParameters)
-{
-    float temperature;
-    bool alert_state = false;
-
-    while (1)
-    {
-        if (xQueuePeek(xTempQueue, &temperature, 0) == pdTRUE)
-        {
-            if (temperature > temp_threshold)
-            {
-                // Red LED and buzzer for high temperature
-                gpio_put(LED_RED_PIN, 1);
-                gpio_put(LED_GREEN_PIN, 0);
-                gpio_put(LED_BLUE_PIN, 0);
-
-                if (!alert_state)
-                {
-                    gpio_put(BUZZER_PIN, 1);
-                    vTaskDelay(pdMS_TO_TICKS(100));
-                    gpio_put(BUZZER_PIN, 0);
-                    alert_state = true;
-                }
-            }
-            else
-            {
-                // Green LED for normal temperature
-                gpio_put(LED_RED_PIN, 0);
-                gpio_put(LED_GREEN_PIN, 1);
-                gpio_put(LED_BLUE_PIN, 0);
-                alert_state = false;
-            }
-        }
-
-        // Check button for threshold change
-        if (!gpio_get(BUTTON_A_PIN))
-        {
-            temp_threshold += 5.0f;
-            if (temp_threshold > 40.0f)
-            {
-                temp_threshold = 20.0f;
-            }
-            vTaskDelay(pdMS_TO_TICKS(300)); // Debounce
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(100));
+// Update RGB LED based on noise level
+void updateLEDStatus(int level) {
+    if (level < warningThreshold) {
+        // Green - OK
+        gpio_put(LED_RED, 0);
+        gpio_put(LED_GREEN, 1);
+        gpio_put(LED_BLUE, 0);
+    } else if (level < dangerThreshold) {
+        // Yellow - Warning
+        gpio_put(LED_RED, 1);
+        gpio_put(LED_GREEN, 1);
+        gpio_put(LED_BLUE, 0);
+    } else {
+        // Red - Danger
+        gpio_put(LED_RED, 1);
+        gpio_put(LED_GREEN, 0);
+        gpio_put(LED_BLUE, 0);
     }
+}
+
+// Task to handle joystick and button inputs
+void vTaskHandleInput(void *pvParameters) {
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    
+    while (1) {
+        // Check if button A is pressed (decrease threshold)
+        if (!gpio_get(BTN_A)) {
+            warningThreshold -= 100;
+            dangerThreshold -= 100;
+            vTaskDelay(pdMS_TO_TICKS(200)); // Debounce
+        }
+        
+        // Check if button B is pressed (increase threshold)
+        if (!gpio_get(BTN_B)) {
+            warningThreshold += 100;
+            dangerThreshold += 100;
+            vTaskDelay(pdMS_TO_TICKS(200)); // Debounce
+        }
+        
+        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(50));
+    }
+}
+
+int main() {
+    // Initialize stdio
+    stdio_init_all();
+    
+    // Initialize hardware
+    initializeHardware();
+    
+    // Create mutex for display access
+    displayMutex = xSemaphoreCreateMutex();
+    
+    // Create tasks
+    xTaskCreate(vTaskMonitorNoise, "NoiseMonitor", configMINIMAL_STACK_SIZE, NULL, 2, NULL);
+    xTaskCreate(vTaskUpdateDisplay, "DisplayUpdate", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
+    xTaskCreate(vTaskHandleInput, "InputHandler", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
+    
+    // Start the scheduler
+    vTaskStartScheduler();
+    
+    // We should never get here
+    while (1) {};
+    
+    return 0;
 }
