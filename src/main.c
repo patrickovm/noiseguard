@@ -1,9 +1,11 @@
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 
 #include "pico/stdlib.h"
 #include "hardware/adc.h"
 #include "hardware/i2c.h"
+#include <hardware/dma.h>
 
 #include "FreeRTOS.h"
 #include "task.h"
@@ -32,6 +34,11 @@
 #define SAMPLE_RATE_MS 100
 #define DISPLAY_UPDATE_MS 500
 
+#define SAMPLES 200
+
+static uint16_t adc_buffer[SAMPLES];
+static uint dma_channel;
+static dma_channel_config dma_cfg;
 static SemaphoreHandle_t displayMutex;
 
 static uint8_t display_buffer[ssd1306_buffer_length];
@@ -66,7 +73,7 @@ void init_peripherals(void)
 
     adc_init();
     adc_gpio_init(MIC_IN);
-    adc_select_input(2);
+    adc_gpio_init(JOYSTICK_X);
 
     i2c_init(i2c1, 400000);
     gpio_set_function(I2C_SDA, GPIO_FUNC_I2C);
@@ -75,6 +82,22 @@ void init_peripherals(void)
     gpio_pull_up(I2C_SCL);
 
     ssd1306_init();
+
+    adc_fifo_setup(
+        true,  // Enable FIFO
+        true,  // Enable DMA request
+        1,     // DREQ threshold
+        false, // ERR bit
+        false  // Byte mode
+    );
+    adc_set_clkdiv(96.0f); // Set sampling rate
+
+    dma_channel = dma_claim_unused_channel(true);
+    dma_cfg = dma_channel_get_default_config(dma_channel);
+    channel_config_set_transfer_data_size(&dma_cfg, DMA_SIZE_16);
+    channel_config_set_read_increment(&dma_cfg, false);
+    channel_config_set_write_increment(&dma_cfg, true);
+    channel_config_set_dreq(&dma_cfg, DREQ_ADC);
 }
 
 int read_joystick_x(void)
@@ -83,18 +106,40 @@ int read_joystick_x(void)
     return adc_read();
 }
 
+float calculate_rms(uint16_t *buffer, int samples) {
+    float sum = 0.0f;
+    for(int i = 0; i < samples; i++) {
+        float voltage = buffer[i] * 3.3f / (1 << 12);
+        sum += voltage * voltage;
+    }
+    return sqrt(sum / samples);
+}
 
 void vTaskMonitorNoise(void *pvParameters)
 {
     TickType_t xLastWakeTime = xTaskGetTickCount();
 
-    while (1)
-    {
+    while (1) {
         adc_select_input(2);
-        uint16_t raw = adc_read();
-        noise_level = raw;
-        update_led_status(raw);
-
+        adc_fifo_drain();
+        adc_run(false);
+        
+        dma_channel_configure(dma_channel, &dma_cfg,
+            adc_buffer,
+            &adc_hw->fifo,
+            SAMPLES,
+            true
+        );
+        
+        adc_run(true);
+        dma_channel_wait_for_finish_blocking(dma_channel);
+        adc_run(false);
+        
+        // Calculate RMS noise level
+        float rms = calculate_rms(adc_buffer, SAMPLES);
+        noise_level = (int)(rms * 1000); // Scale for display
+        
+        update_led_status(noise_level);
         vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(SAMPLE_RATE_MS));
     }
 }
@@ -168,8 +213,8 @@ void vTaskHandleInput(void *pvParameters)
 {
     TickType_t xLastWakeTime = xTaskGetTickCount();
     const int joystick_center = 2048;
-    const int deadzone = 500; 
-    
+    const int deadzone = 500;
+
     while (1)
     {
         if (!gpio_get(BTN_A))
@@ -185,7 +230,7 @@ void vTaskHandleInput(void *pvParameters)
             danger_threshold += 100;
             vTaskDelay(pdMS_TO_TICKS(200)); // Debounce
         }
-        
+
         int joystick_value = read_joystick_x();
         if (abs(joystick_value - joystick_center) > deadzone)
         {

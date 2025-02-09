@@ -55,6 +55,7 @@ target_link_libraries(noiseguard
         pico_stdlib
         hardware_adc
         hardware_i2c
+        hardware_dma
         FreeRTOS-Kernel
         FreeRTOS-Kernel-Heap4
 )
