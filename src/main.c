@@ -23,6 +23,10 @@
 #define I2C_SDA 14
 #define I2C_SCL 15
 
+#define DEFAULT_GAP 1000
+#define MIN_GAP 200
+#define MAX_GAP 2000
+
 #define NOISE_THRESHOLD_WARNING 2000
 #define NOISE_THRESHOLD_DANGER 3000
 #define SAMPLE_RATE_MS 100
@@ -34,6 +38,7 @@ static uint8_t display_buffer[ssd1306_buffer_length];
 static int noise_level = 0;
 static int warning_threshold = NOISE_THRESHOLD_WARNING;
 static int danger_threshold = NOISE_THRESHOLD_DANGER;
+static int threshold_gap = DEFAULT_GAP;
 
 void vTaskMonitorNoise(void *pvParameters);
 void vTaskUpdateDisplay(void *pvParameters);
@@ -41,6 +46,7 @@ void vTaskHandleInput(void *pvParameters);
 
 void update_led_status(int level);
 void init_peripherals(void);
+int read_joystick_x(void);
 
 void init_peripherals(void)
 {
@@ -71,12 +77,20 @@ void init_peripherals(void)
     ssd1306_init();
 }
 
+int read_joystick_x(void)
+{
+    adc_select_input(1);
+    return adc_read();
+}
+
+
 void vTaskMonitorNoise(void *pvParameters)
 {
     TickType_t xLastWakeTime = xTaskGetTickCount();
 
     while (1)
     {
+        adc_select_input(2);
         uint16_t raw = adc_read();
         noise_level = raw;
         update_led_status(raw);
@@ -153,7 +167,9 @@ void update_led_status(int level)
 void vTaskHandleInput(void *pvParameters)
 {
     TickType_t xLastWakeTime = xTaskGetTickCount();
-
+    const int joystick_center = 2048;
+    const int deadzone = 500; 
+    
     while (1)
     {
         if (!gpio_get(BTN_A))
@@ -169,7 +185,23 @@ void vTaskHandleInput(void *pvParameters)
             danger_threshold += 100;
             vTaskDelay(pdMS_TO_TICKS(200)); // Debounce
         }
-
+        
+        int joystick_value = read_joystick_x();
+        if (abs(joystick_value - joystick_center) > deadzone)
+        {
+            if (joystick_value > joystick_center)
+            {
+                // Aumentar gap
+                threshold_gap = threshold_gap < MAX_GAP ? threshold_gap + 50 : MAX_GAP;
+            }
+            else
+            {
+                // Diminuir gap
+                threshold_gap = threshold_gap > MIN_GAP ? threshold_gap - 50 : MIN_GAP;
+            }
+            danger_threshold = warning_threshold + threshold_gap;
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
         vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(50));
     }
 }

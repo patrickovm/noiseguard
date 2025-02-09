@@ -6,6 +6,8 @@ Usage:
 
 * Press button B to increase values of warning and danger thresholds.
 
+* use joystick x axis to decrease or increase the gap between the thresholds.
+
 functioning:
 
 * The LED will stay in green when the level of noise is below the warning threshold.
