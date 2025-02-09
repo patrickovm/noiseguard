@@ -4,9 +4,11 @@
 #include "pico/stdlib.h"
 #include "hardware/adc.h"
 #include "hardware/i2c.h"
+
 #include "FreeRTOS.h"
 #include "task.h"
 #include "semphr.h"
+
 #include "ssd1306.h"
 
 #define LED_RED 13
@@ -27,18 +29,20 @@
 #define DISPLAY_UPDATE_MS 500
 
 static SemaphoreHandle_t displayMutex;
-static uint8_t displayBuffer[ssd1306_buffer_length];
-static int noiseLevel = 0;
-static int warningThreshold = NOISE_THRESHOLD_WARNING;
-static int dangerThreshold = NOISE_THRESHOLD_DANGER;
+
+static uint8_t display_buffer[ssd1306_buffer_length];
+static int noise_level = 0;
+static int warning_threshold = NOISE_THRESHOLD_WARNING;
+static int danger_threshold = NOISE_THRESHOLD_DANGER;
 
 void vTaskMonitorNoise(void *pvParameters);
 void vTaskUpdateDisplay(void *pvParameters);
 void vTaskHandleInput(void *pvParameters);
-void update_led_status(int level);
-void init_hardware(void);
 
-void init_hardware(void)
+void update_led_status(int level);
+void init_peripherals(void);
+
+void init_peripherals(void)
 {
     gpio_init(LED_RED);
     gpio_init(LED_GREEN);
@@ -74,7 +78,7 @@ void vTaskMonitorNoise(void *pvParameters)
     while (1)
     {
         uint16_t raw = adc_read();
-        noiseLevel = raw;
+        noise_level = raw;
         update_led_status(raw);
 
         vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(SAMPLE_RATE_MS));
@@ -97,22 +101,22 @@ void vTaskUpdateDisplay(void *pvParameters)
         if (xSemaphoreTake(displayMutex, pdMS_TO_TICKS(100)) == pdTRUE)
         {
             // Clear buffer
-            memset(displayBuffer, 0, sizeof(displayBuffer));
+            memset(display_buffer, 0, sizeof(display_buffer));
 
-            ssd1306_draw_string(displayBuffer, 0, 0, "Noise Guard");
+            ssd1306_draw_string(display_buffer, 0, 0, "Noise Guard");
 
             // Draw current level
             char levelStr[32];
-            snprintf(levelStr, sizeof(levelStr), "Level: %d", noiseLevel);
-            ssd1306_draw_string(displayBuffer, 0, 16, levelStr);
+            snprintf(levelStr, sizeof(levelStr), "Level: %d", noise_level);
+            ssd1306_draw_string(display_buffer, 0, 16, levelStr);
 
             // Draw thresholds
-            snprintf(levelStr, sizeof(levelStr), "Warn: %d", warningThreshold);
-            ssd1306_draw_string(displayBuffer, 0, 32, levelStr);
-            snprintf(levelStr, sizeof(levelStr), "Dang: %d", dangerThreshold);
-            ssd1306_draw_string(displayBuffer, 0, 48, levelStr);
+            snprintf(levelStr, sizeof(levelStr), "Warn: %d", warning_threshold);
+            ssd1306_draw_string(display_buffer, 0, 32, levelStr);
+            snprintf(levelStr, sizeof(levelStr), "Dang: %d", danger_threshold);
+            ssd1306_draw_string(display_buffer, 0, 48, levelStr);
 
-            render_on_display(displayBuffer, &area);
+            render_on_display(display_buffer, &area);
 
             xSemaphoreGive(displayMutex);
         }
@@ -123,14 +127,14 @@ void vTaskUpdateDisplay(void *pvParameters)
 
 void update_led_status(int level)
 {
-    if (level < warningThreshold)
+    if (level < warning_threshold)
     {
         // Green - OK
         gpio_put(LED_RED, 0);
         gpio_put(LED_GREEN, 1);
         gpio_put(LED_BLUE, 0);
     }
-    else if (level < dangerThreshold)
+    else if (level < danger_threshold)
     {
         // Yellow - Warning
         gpio_put(LED_RED, 1);
@@ -154,15 +158,15 @@ void vTaskHandleInput(void *pvParameters)
     {
         if (!gpio_get(BTN_A))
         {
-            warningThreshold -= 100;
-            dangerThreshold -= 100;
+            warning_threshold -= 100;
+            danger_threshold -= 100;
             vTaskDelay(pdMS_TO_TICKS(200)); // Debounce
         }
 
         if (!gpio_get(BTN_B))
         {
-            warningThreshold += 100;
-            dangerThreshold += 100;
+            warning_threshold += 100;
+            danger_threshold += 100;
             vTaskDelay(pdMS_TO_TICKS(200)); // Debounce
         }
 
@@ -174,7 +178,7 @@ int main()
 {
     stdio_init_all();
 
-    init_hardware();
+    init_peripherals();
 
     displayMutex = xSemaphoreCreateMutex();
 
