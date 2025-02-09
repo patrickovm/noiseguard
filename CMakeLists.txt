@@ -41,11 +41,8 @@ pico_sdk_init()
 
 add_executable(noiseguard 
         src/main.c
-        lib/ds18b20/ds18b20.c
         lib/ssd1306/ssd1306_i2c.c
 )
-
-add_subdirectory(lib/onewire_library)
 
 pico_set_program_name(noiseguard "noiseguard")
 pico_set_program_version(noiseguard "0.1")
@@ -58,10 +55,8 @@ target_link_libraries(noiseguard
         pico_stdlib
         hardware_adc
         hardware_i2c
-        hardware_pio
         FreeRTOS-Kernel
         FreeRTOS-Kernel-Heap4
-        onewire_library
 )
 
 # Add the standard include files to the build
@@ -69,7 +64,6 @@ target_include_directories(noiseguard PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
         ${CMAKE_CURRENT_LIST_DIR}/include
         ${CMAKE_CURRENT_LIST_DIR}/lib/ssd1306
-        ${CMAKE_CURRENT_LIST_DIR}/lib/ds18b20
 )
 
 # Add any user requested libraries
@@ -78,4 +72,3 @@ target_link_libraries(noiseguard
         )
 
 pico_add_extra_outputs(noiseguard)
-
