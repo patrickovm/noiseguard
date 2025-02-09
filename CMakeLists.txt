@@ -25,8 +25,12 @@ endif()
 # ====================================================================================
 set(PICO_BOARD pico_w CACHE STRING "Board type")
 
+set(FREERTOS_KERNEL_PATH ${CMAKE_CURRENT_SOURCE_DIR}/lib/FreeRTOS-Kernel)
+
 # Pull in Raspberry Pi Pico SDK (must be before project)
 include(pico_sdk_import.cmake)
+
+include(${FREERTOS_KERNEL_PATH}/portable/ThirdParty/GCC/RP2040/FreeRTOS_Kernel_import.cmake)
 
 project(noiseguard C CXX ASM)
 
@@ -35,7 +39,13 @@ pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
 
-add_executable(noiseguard noiseguard.c )
+add_executable(noiseguard 
+        src/main.c
+        lib/ds18b20/ds18b20.c
+        lib/ssd1306/ssd1306_i2c.c
+)
+
+add_subdirectory(lib/onewire_library)
 
 pico_set_program_name(noiseguard "noiseguard")
 pico_set_program_version(noiseguard "0.1")
@@ -44,13 +54,22 @@ pico_set_program_version(noiseguard "0.1")
 pico_enable_stdio_uart(noiseguard 0)
 pico_enable_stdio_usb(noiseguard 1)
 
-# Add the standard library to the build
 target_link_libraries(noiseguard
-        pico_stdlib)
+        pico_stdlib
+        hardware_adc
+        hardware_i2c
+        hardware_pio
+        FreeRTOS-Kernel
+        FreeRTOS-Kernel-Heap4
+        onewire_library
+)
 
 # Add the standard include files to the build
 target_include_directories(noiseguard PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
+        ${CMAKE_CURRENT_LIST_DIR}/include
+        ${CMAKE_CURRENT_LIST_DIR}/lib/ssd1306
+        ${CMAKE_CURRENT_LIST_DIR}/lib/ds18b20
 )
 
 # Add any user requested libraries
