@@ -39,8 +39,10 @@ pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
 
+file(GLOB SRC_FILES "src/*.c")
+
 add_executable(noiseguard 
-        src/main.c
+        ${SRC_FILES}
         lib/ssd1306/ssd1306_i2c.c
 )
 
